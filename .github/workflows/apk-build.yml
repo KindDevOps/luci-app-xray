@@ -1,0 +1,196 @@
+name: Alpine APK Build
+
+on:
+  push:
+    branches:
+      - apk
+  pull_request:
+    branches:
+      - apk
+  workflow_dispatch:
+
+env:
+  PACKAGE_NAME: luci-app-xray
+  TARGET: alpine
+  SDK_TARGET: x86
+  SDK_VERSION: 25.12
+  CACHE_DIR: ~/cache
+
+jobs:
+  build:
+    name: Build Alpine APK
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CACHE_DIR }}
+          key: alpine-${{ env.PACKAGE_NAME }}-${{ github.ref_name }}-${{ hashFiles('**/core/Makefile') }}
+          restore-keys: |
+            alpine-${{ env.PACKAGE_NAME }}-
+          restore-keys-env: |
+            alpine-${{ env.PACKAGE_NAME }}-
+
+      - name: Install Dependencies
+        run: |
+          DEBIAN_FRONTEND=noninteractive sudo apt-get update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y \
+            ccache \
+            gettext \
+            libncurses5-dev \
+            xsltproc \
+            zstd \
+            tar \
+            wget \
+            curl \
+            unzip
+
+      - name: Create Directories
+        run: |
+          CACHE_DIR_SDK="$(eval echo "$CACHE_DIR/sdk")"
+          CACHE_DIR_DL="$(eval echo "$CACHE_DIR/dl")"
+          CACHE_DIR_FEEDS="$(eval echo "$CACHE_DIR/feeds")"
+          CACHE_DIR_TARGET="$(eval echo "$CACHE_DIR/target")"
+          
+          echo "CACHE_DIR_SDK: $CACHE_DIR_SDK"
+          echo "CACHE_DIR_DL: $CACHE_DIR_DL"
+          echo "CACHE_DIR_FEEDS: $CACHE_DIR_FEEDS"
+          echo "CACHE_DIR_TARGET: $CACHE_DIR_TARGET"
+          
+          test -d "$CACHE_DIR_SDK" || mkdir -p "$CACHE_DIR_SDK"
+          test -d "$CACHE_DIR_DL" || mkdir -p "$CACHE_DIR_DL"
+          test -d "$CACHE_DIR_FEEDS" || mkdir -p "$CACHE_DIR_FEEDS"
+          test -d "$CACHE_DIR_TARGET" || mkdir -p "$CACHE_DIR_TARGET"
+          
+          echo "CACHE_DIR_SDK=$CACHE_DIR_SDK" >> $GITHUB_ENV
+          echo "CACHE_DIR_DL=$CACHE_DIR_DL" >> $GITHUB_ENV
+          echo "CACHE_DIR_FEEDS=$CACHE_DIR_FEEDS" >> $GITHUB_ENV
+          echo "CACHE_DIR_TARGET=$CACHE_DIR_TARGET" >> $GITHUB_ENV
+          echo "SDK_HOME=$(mktemp -d)" >> $GITHUB_ENV
+
+      - name: Download and Unzip SDK
+        run: |
+          cd "$CACHE_DIR_SDK"
+          
+          # Create a simple sha256sums file for the target SDK
+          echo "25.12.2-sdk-25.12.2-x86-64" > sha256sums.small
+          
+          # Download the SDK
+          SDK_FILE="25.12.2-sdk-25.12.2-x86-64"
+          
+          if ! sha256sum -c ./sha256sums.small >/dev/null 2>&1 ; then
+            wget -q -O "$SDK_FILE" "https://downloads.openwrt.org/releases/${{ env.SDK_VERSION }}/targets/${{ env.SDK_TARGET }}/${{ env.SDK_VERSION }}/${SDK_FILE}"
+            if ! sha256sum -c ./sha256sums.small >/dev/null 2>&1 ; then
+              echo "::error::SDK can not be verified!"
+              exit 1
+            fi
+          fi
+          
+          cd -
+          file "$CACHE_DIR_SDK/$SDK_FILE"
+
+      - name: Setup SDK Environment
+        run: |
+          cd "$SDK_HOME"
+          
+          # Set up symlinks for feeds and downloads
+          test -d "dl" && rm -rf "dl" || true
+          test -d "feeds" && rm -rf "feeds" || true
+          ln -s "$CACHE_DIR_DL" "dl"
+          ln -s "$CACHE_DIR_FEEDS" "feeds"
+          
+          # Create a feeds.conf for Alpine
+          cat > feeds.conf << 'EOF'
+          src-git full https://github.com/openwrt/openwrt.git
+          src-git packages https://github.com/openwrt/packages.git
+          src-git luci https://github.com/openwrt/luci.git
+          EOF
+          
+          cd -
+
+      - name: Update and Install Packages
+        run: |
+          cd "$SDK_HOME"
+          
+          # Update all feeds
+          ./scripts/feeds update -a
+          
+          # Install packages
+          ./scripts/feeds install -a
+          
+          # Link our package
+          ln -s "${{ github.workspace }}" "package/${PACKAGE_NAME}"
+          
+          # Re-install to pick up our changes
+          ./scripts/feeds install -p ${PACKAGE_NAME}
+          
+          cd -
+
+      - name: Configure for Alpine
+        run: |
+          cd "$SDK_HOME"
+          
+          # Clean configuration
+          make defconfig
+          
+          # Set up build target for Alpine
+          sed -i 's/CONFIG_TARGET_x86_64=y/CONFIG_TARGET_x86_64=y/' .config
+          sed -i 's/CONFIG_TARGET_i386=n/CONFIG_TARGET_i386=y/' .config
+          
+          # Build status
+          make package/${PACKAGE_NAME}/status/compile V=s 2>&1 | tee build.log || true
+          
+          cd -
+
+      - name: Build the Package
+        run: |
+          cd "$SDK_HOME"
+          
+          # Compile just our package
+          make package/${PACKAGE_NAME}/compile/${PACKAGE_NAME} V=s
+          
+          # Find the built APK
+          find "$SDK_HOME/bin/" -type f \( -name "*.ipk" -o -name "*.apk" \) -exec ls -lh {} \;
+          
+          # Copy the binary
+          BINARY_NAME="${PACKAGE_NAME}"
+          APK_NAME="${PACKAGE_NAME}.apk"
+          
+          if [ -f "$SDK_HOME/bin/${BINARY_NAME}" ]; then
+            cp "$SDK_HOME/bin/${BINARY_NAME}" "${{ github.workspace }}/${BINARY_NAME}"
+            echo "Built binary: $BINARY_NAME"
+          fi
+          
+          if [ -f "$SDK_HOME/bin/${APK_NAME}" ]; then
+            cp "$SDK_HOME/bin/${APK_NAME}" "${{ github.workspace }}/${APK_NAME}"
+            echo "Built APK: $APK_NAME"
+          fi
+          
+          cd -
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpine-artifacts
+          path: |
+            ./${PACKAGE_NAME}*
+            ./${PACKAGE_NAME}.apk
+          if-not-exist: true
+
+      - name: Debug: List Files
+        run: |
+          ls -la
+          find . -maxdepth 2 -type f -name "*.apk" -o -name "*.ipk" -o -name "${PACKAGE_NAME}" | head -20
+
+      - name: Print Build Info
+        run: |
+          echo "=== Build Summary ==="
+          echo "Package: $PACKAGE_NAME"
+          echo "Target: $TARGET"
+          echo "Branch: $GITHUB_REF_NAME"
+          echo "=== End Summary ==="
