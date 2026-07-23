@@ -8,6 +8,10 @@ on:
     branches:
       - apk
   workflow_dispatch:
+    with:
+      target: 'alpine'
+      sdk_version: '25.12'
+      sdk_target: 'x86'
     inputs:
       target:
         description: 'Build target architecture'
