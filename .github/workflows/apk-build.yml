@@ -12,7 +12,7 @@ on:
       target:
         description: 'Build target architecture'
         required: false
-        default: 'alpine'
+        default: 'x86_64'
       sdk_version:
         description: 'OpenWrt SDK version'
         required: false
@@ -20,25 +20,51 @@ on:
       sdk_target:
         description: 'SDK target architecture'
         required: false
-        default: 'x86'
+        default: 'x86_64'
+
+env:
+  PACKAGE_NAME: luci-app-xray
+  CACHE_DIR: ~/cache
+  SDK_HOME: ~/openwrt-sdk
 
 jobs:
   build:
     name: Build Alpine APK
     runs-on: ubuntu-latest
     
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: x86_64
+            arch: x86_64
+            sdk_url_path: https://downloads.openwrt.org/releases/25.12.2/targets/x86/64
+            sdk_name: -sdk-25.12.2-x86-64_
+            feeds_target: alpine_3.19
+          - id: armv8
+            arch: armv8
+            sdk_url_path: https://downloads.openwrt.org/releases/25.12.2/targets/arm/cortex-a53
+            sdk_name: -sdk-25.12.2-arm-cortexa53_
+            feeds_target: alpine_3.19
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Prepare Cache Key
+        id: cache_key
+        run: |
+          echo "timestamp=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Cache
         uses: actions/cache@v4
         with:
           path: |
             ${{ env.CACHE_DIR }}
-          key: alpine-${{ env.PACKAGE_NAME }}-${{ github.ref_name }}-${{ hashFiles('**/core/Makefile') }}
+            ${{ env.SDK_HOME }}
+          key: alpine-${{ matrix.arch }}-${{ matrix.id }}-${{ env.PACKAGE_NAME }}-${{ steps.cache_key.outputs.timestamp }}
           restore-keys: |
-            alpine-${{ env.PACKAGE_NAME }}-
+            alpine-${{ matrix.arch }}-${{ matrix.id }}-${{ env.PACKAGE_NAME }}-
 
       - name: Install Dependencies
         run: |
@@ -52,153 +78,176 @@ jobs:
             tar \
             wget \
             curl \
-            unzip
+            unzip \
+            file
 
       - name: Create Directories
         run: |
           CACHE_DIR_SDK="${{ env.CACHE_DIR }}/sdk"
           CACHE_DIR_DL="${{ env.CACHE_DIR }}/dl"
           CACHE_DIR_FEEDS="${{ env.CACHE_DIR }}/feeds"
-          CACHE_DIR_TARGET="${{ env.CACHE_DIR }}/target"
           
           echo "CACHE_DIR_SDK: $CACHE_DIR_SDK"
           echo "CACHE_DIR_DL: $CACHE_DIR_DL"
           echo "CACHE_DIR_FEEDS: $CACHE_DIR_FEEDS"
-          echo "CACHE_DIR_TARGET: $CACHE_DIR_TARGET"
           
           test -d "$CACHE_DIR_SDK" || mkdir -p "$CACHE_DIR_SDK"
           test -d "$CACHE_DIR_DL" || mkdir -p "$CACHE_DIR_DL"
           test -d "$CACHE_DIR_FEEDS" || mkdir -p "$CACHE_DIR_FEEDS"
-          test -d "$CACHE_DIR_TARGET" || mkdir -p "$CACHE_DIR_TARGET"
           
           echo "CACHE_DIR_SDK=$CACHE_DIR_SDK" >> $GITHUB_ENV
           echo "CACHE_DIR_DL=$CACHE_DIR_DL" >> $GITHUB_ENV
           echo "CACHE_DIR_FEEDS=$CACHE_DIR_FEEDS" >> $GITHUB_ENV
-          echo "CACHE_DIR_TARGET=$CACHE_DIR_TARGET" >> $GITHUB_ENV
-          test -d "$SDK_HOME" || echo "${{ env.SDK_HOME}}" > "$SDK_HOME"
 
       - name: Download and Unzip SDK
         run: |
           cd "$CACHE_DIR_SDK"
           
-          # Create a simple sha256sums file for the target SDK
-          SDK_FILE="25.12.2-sdk-25.12.2-x86-64"
+          # SDK filename (without version for flexibility)
+          SDK_FILE="${{ matrix.sdk_name }}${{ matrix.arch }}"
           
           # Check if SDK already exists
           if [ ! -f "$SDK_FILE" ]; then
             echo "Downloading SDK..."
-            wget -q -O "$SDK_FILE" "https://downloads.openwrt.org/releases/${{ env.SDK_VERSION }}/targets/${{ env.SDK_TARGET }}/${{ env.SDK_VERSION }}/${SDK_FILE}"
+            wget -q --show-progress -O "$SDK_FILE" "${{ matrix.sdk_url_path }}/$SDK_FILE"
           fi
           
-          # Verify the download
-          if [ -f "sha256sums.small" ]; then
-            if ! sha256sum -c ./sha256sums.small >/dev/null 2>&1 ; then
-              echo "::warning::SDK sha256 verification failed, re-downloading..."
-              wget -q -O "$SDK_FILE" "https://downloads.openwrt.org/releases/${{ env.SDK_VERSION }}/targets/${{ env.SDK_TARGET }}/${{ env.SDK_VERSION }}/${SDK_FILE}"
-              sha256sum "$SDK_FILE" > sha256sums.small
-            fi
-          fi
+          # List the downloaded file
+          file "$SDK_FILE"
           
-          cd -
-          file "$CACHE_DIR_SDK/$SDK_FILE"
-
-      - name: Setup SDK Environment
-        run: |
-          cd "$SDK_HOME"
+          # Extract SDK to a new location
+          SDK_EXTRACT_DIR=$(mktemp -d)/openwrt
+          tar -C "$SDK_EXTRACT_DIR" --strip=1 -xf "$SDK_FILE"
           
           # Set up symlinks for feeds and downloads
-          test -d "dl" && rm -rf "dl" || true
-          test -d "feeds" && rm -rf "feeds" || true
-          ln -s "$CACHE_DIR_DL" "dl"
-          ln -s "$CACHE_DIR_FEEDS" "feeds"
+          SDK_EXTRACT_DIR="$(eval echo "$SDK_EXTRACT_DIR")"
+          test -d "$SDK_EXTRACT_DIR/dl" && rm -rf "$SDK_EXTRACT_DIR/dl" || true
+          test -d "$SDK_EXTRACT_DIR/feeds" && rm -rf "$SDK_EXTRACT_DIR/feeds" || true
+          
+          ln -s "$CACHE_DIR_DL" "$SDK_EXTRACT_DIR/dl"
+          ln -s "$CACHE_DIR_FEEDS" "$SDK_EXTRACT_DIR/feeds"
+          
+          echo "SDK_EXTRACT_DIR=$SDK_EXTRACT_DIR" >> $GITHUB_ENV
+
+      - name: Setup Feeds
+        run: |
+          cd "$SDK_EXTRACT_DIR"
           
           # Create a feeds.conf for Alpine
           cat > feeds.conf << EOF
           src-git full https://github.com/openwrt/openwrt.git
           src-git packages https://github.com/openwrt/packages.git
           src-git luci https://github.com/openwrt/luci.git
+          src-git telephony https://github.com/openwrt/telephony.git
           EOF
           
-          cd -
+          echo "feeds.conf created"
+          cat feeds.conf
 
       - name: Update and Install Packages
         run: |
-          cd "$SDK_HOME"
+          cd "$SDK_EXTRACT_DIR"
           
           # Update all feeds
           ./scripts/feeds update -a
           
-          # Install packages
+          # Install all feeds
           ./scripts/feeds install -a
           
-          # Link our package
-          ln -s "${{ github.workspace }}" "package/${PACKAGE_NAME}"
-          
-          # Re-install to pick up our changes
-          ./scripts/feeds install -p ${PACKAGE_NAME}
-          
-          cd -
+          # Show installed packages
+          ./scripts/feeds list | grep -E "(luci|packages|full)" || true
 
       - name: Configure for Alpine
         run: |
-          cd "$SDK_HOME"
+          cd "$SDK_EXTRACT_DIR"
           
-          # Clean configuration
-          make defconfig
+          # Copy .config from base SDK
+          if [ -f .config ]; then
+            cp .config .config.base
+          fi
           
-          # Set up build target for Alpine
-          sed -i 's/CONFIG_TARGET_x86_64=y/CONFIG_TARGET_x86_64=y/' .config
-          sed -i 's/CONFIG_TARGET_i386=n/CONFIG_TARGET_i386=y/' .config
+          # Create Alpine-specific config
+          cat > .config << EOF
+          # Configuration for Alpine
+          CONFIG_TARGET_x86_64=y
+          CONFIG_TARGET_IMAGES_GZIP=y
+          CONFIG_TARGET_ROOTFS_DATA_SIZE_64M=y
+          CONFIG_TARGET_ROOTFS_SQUASHFS_SIZE_64M=y
+          CONFIG_TARGET_ROOTFS_SIZE_64M=y
+          CONFIG_TARGET_ALPINE=y
+          CONFIG_TARGET_ALPINE_ROOTFS_SIZE_64M=y
+          CONFIG_TARGET_ALPINE_FEEDS=y
+          CONFIG_TARGET_ALPINE_PACKAGES=y
+          CONFIG_TARGET_ALPINE_LUCI=y
+          CONFIG_TARGET_ALPINE_TELEPHONY=y
+          CONFIG_TARGET_ALPINE_FEEDS_CONF=y
           
-          # Build status
-          make package/${PACKAGE_NAME}/status/compile V=s 2>&1 | tee build.log || true
+          # Select feeds target
+          CONFIG_FEEDS_TARGET_${{ matrix.feeds_target }}=y
           
-          cd -
+          # Basic build options
+          CONFIG_PACKAGE_BUSYBOX=y
+          CONFIG_PACKAGE_BUSYBOX_SHOW_WAIT=y
+          CONFIG_PACKAGE_OPKG=y
+          CONFIG_PACKAGE_DASH=y
+          CONFIG_TARGET_ROOTFS=y
+          EOF
+          
+          echo ".config configured for Alpine"
 
-      - name: Build the Package
+      - name: Build Packages
         run: |
-          cd "$SDK_HOME"
+          cd "$SDK_EXTRACT_DIR"
+          
+          # Clean previous build if exists
+          make package/${{ env.PACKAGE_NAME }}/status/{clean,compile} V=s || true
           
           # Compile just our package
-          make package/${PACKAGE_NAME}/compile/${PACKAGE_NAME} V=s || true
+          make package/${{ env.PACKAGE_NAME }}/compile/${{ env.PACKAGE_NAME }} V=s || true
           
-          # Find the built APK
-          find "$SDK_HOME/bin/" -type f \( -name "*.ipk" -o -name "*.apk" \) -exec ls -lh {} \;
+          # List built files
+          echo "=== Built files in bin/ ==="
+          find "$SDK_EXTRACT_DIR/bin/" -type f \( -name "*.ipk" -o -name "*.apk" \) -exec ls -lh {} \; || true
+
+      - name: Copy Artifacts
+        run: |
+          cd "$SDK_EXTRACT_DIR"
           
-          # Copy the binary
-          BINARY_NAME="${PACKAGE_NAME}"
-          APK_NAME="${PACKAGE_NAME}.apk"
+          # Copy the main binary
+          BINARY_NAME="${{ env.PACKAGE_NAME }}"
           
-          if [ -f "$SDK_HOME/bin/${BINARY_NAME}" ]; then
-            cp "$SDK_HOME/bin/${BINARY_NAME}" "${{ github.workspace }}/${BINARY_NAME}"
+          if [ -f "$SDK_EXTRACT_DIR/bin/${BINARY_NAME}" ]; then
+            cp "$SDK_EXTRACT_DIR/bin/${BINARY_NAME}" "${{ github.workspace }}/${BINARY_NAME}"
             echo "Built binary: $BINARY_NAME"
           fi
           
-          if [ -f "$SDK_HOME/bin/${APK_NAME}" ]; then
-            cp "$SDK_HOME/bin/${APK_NAME}" "${{ github.workspace }}/${APK_NAME}"
+          # Copy the .apk if it exists
+          APK_NAME="${{ env.PACKAGE_NAME }}.apk"
+          
+          if [ -f "$SDK_EXTRACT_DIR/bin/${APK_NAME}" ]; then
+            cp "$SDK_EXTRACT_DIR/bin/${APK_NAME}" "${{ github.workspace }}/${APK_NAME}"
             echo "Built APK: $APK_NAME"
           fi
           
-          cd -
+          # List all artifacts
+          echo "=== Artifact List ==="
+          find "${{ github.workspace }}" -maxdepth 1 -type f \( -name "*.ipk" -o -name "*.apk" \) -exec ls -lh {} \; || true
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Release and Upload Assets
+        uses: softprops/action-gh-release@v1
         with:
-          name: alpine-artifacts
-          path: |
-            ./${PACKAGE_NAME}*
-            ./${PACKAGE_NAME}.apk
-          if-not-exist: true
+          files: |
+            *.ipk
+            *.apk
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Debug List Files
-        run: |
-          ls -la
-          find . -maxdepth 2 -type f \( -name "*.apk" -o -name "*.ipk" \) | head -20
-
-      - name: Print Build Info
-        run: |
-          echo "=== Build Summary ==="
-          echo "Package: $PACKAGE_NAME"
-          echo "Target: $TARGET"
-          echo "Branch: $GITHUB_REF_NAME"
-          echo "=== End Summary ==="
+      - name: Notify Release Publish
+        uses: peter-evans/notify-build-status@v2
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          url: ${{ secrets.TRIGGER_URL }}
+          token: ${{ secrets.TRIGGER_TOKEN }}
+          event: release
+          repository: ${{ github.repository }}
+          ref: ${{ github.ref }}
