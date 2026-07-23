@@ -134,73 +134,19 @@ jobs:
           cd "$SDK_EXTRACT_DIR"
 
           # Create a feeds.conf for Alpine
-          cat > feeds.conf << EOF
-          src-git full https://github.com/openwrt/openwrt.git
-          src-git packages https://github.com/openwrt/packages.git
-          src-git luci https://github.com/openwrt/luci.git
-          src-git telephony https://github.com/openwrt/telephony.git
-          EOF
+          cat > "feeds.conf.default" << 'EOF'
+git::https://github.com/rburton/xray-core-feeds.git
+EOF
 
-          echo "feeds.conf created"
-          cat feeds.conf
-
-      - name: Update and Install Packages
-        run: |
-          cd "$SDK_EXTRACT_DIR"
-
-          # Update all feeds
+          # Update feeds
           ./scripts/feeds update -a
 
-          # Install all feeds
+          # Install feeds
           ./scripts/feeds install -a
 
-          # Show installed packages
-          ./scripts/feeds list | grep -E "(luci|packages|full)" || true
-
-      - name: Configure for Alpine
+      - name: Compile Package
         run: |
           cd "$SDK_EXTRACT_DIR"
-
-          # Copy .config from base SDK if it exists
-          if [ -f .config ]; then
-            cp .config .config.base
-          fi
-
-          # Create Alpine-specific config
-          cat > .config << EOF
-          # Configuration for Alpine
-          CONFIG_TARGET_x86_64=y
-          CONFIG_TARGET_IMAGES_GZIP=y
-          CONFIG_TARGET_ROOTFS_DATA_SIZE_64M=y
-          CONFIG_TARGET_ROOTFS_SQUASHFS_SIZE_64M=y
-          CONFIG_TARGET_ROOTFS_SIZE_64M=y
-          CONFIG_TARGET_ALPINE=y
-          CONFIG_TARGET_ALPINE_ROOTFS_SIZE_64M=y
-          CONFIG_TARGET_ALPINE_FEEDS=y
-          CONFIG_TARGET_ALPINE_PACKAGES=y
-          CONFIG_TARGET_ALPINE_LUCI=y
-          CONFIG_TARGET_ALPINE_TELEPHONY=y
-          CONFIG_TARGET_ALPINE_FEEDS_CONF=y
-
-          # Select feeds target
-          CONFIG_FEEDS_TARGET_${{ matrix.feeds_target }}=y
-
-          # Basic build options
-          CONFIG_PACKAGE_BUSYBOX=y
-          CONFIG_PACKAGE_BUSYBOX_SHOW_WAIT=y
-          CONFIG_PACKAGE_OPKG=y
-          CONFIG_PACKAGE_DASH=y
-          CONFIG_TARGET_ROOTFS=y
-          EOF
-
-          echo ".config configured for Alpine"
-
-      - name: Build Packages
-        run: |
-          cd "$SDK_EXTRACT_DIR"
-
-          # Clean previous build if exists
-          make package/${{ env.PACKAGE_NAME }}/status/{clean,compile} V=s || true
 
           # Compile just our package
           make package/${{ env.PACKAGE_NAME }}/compile/${{ env.PACKAGE_NAME }} V=s || true
@@ -234,7 +180,7 @@ jobs:
           find "${{ github.workspace }}" -maxdepth 1 -type f \( -name "*.ipk" -o -name "*.apk" \) -exec ls -lh {} \; || true
 
       - name: Release and Upload Assets
-        uses: softprops/action-gh_release@v1
+        uses: softprops/action-gh-release@v1
         with:
           files: |
             *.ipk
