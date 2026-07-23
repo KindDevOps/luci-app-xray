@@ -126,10 +126,10 @@ jobs:
           
           # Create a feeds.conf for Alpine
           cat > feeds.conf << EOF
-src-git full https://github.com/openwrt/openwrt.git
-src-git packages https://github.com/openwrt/packages.git
-src-git luci https://github.com/openwrt/luci.git
-EOF
+          src-git full https://github.com/openwrt/openwrt.git
+          src-git packages https://github.com/openwrt/packages.git
+          src-git luci https://github.com/openwrt/luci.git
+          EOF
           
           cd -
 
@@ -202,7 +202,7 @@ EOF
             ./${PACKAGE_NAME}.apk
           if-not-exist: true
 
-      - name: Debug: List Files
+      - name: Debug List Files
         run: |
           ls -la
           find . -maxdepth 2 -type f \( -name "*.apk" -o -name "*.ipk" \) | head -20
