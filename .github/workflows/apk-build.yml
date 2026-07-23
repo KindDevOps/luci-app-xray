@@ -12,15 +12,15 @@ on:
       target:
         description: 'Build target architecture'
         required: false
-        default: '${{ env.TARGET }}'
+        default: 'alpine'
       sdk_version:
         description: 'OpenWrt SDK version'
         required: false
-        default: '${{ env.SDK_VERSION }}'
+        default: '25.12'
       sdk_target:
         description: 'SDK target architecture'
         required: false
-        default: '${{ env.SDK_TARGET }}'
+        default: 'x86'
 
 env:
   PACKAGE_NAME: luci-app-xray
