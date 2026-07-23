@@ -28,7 +28,6 @@ env:
   SDK_TARGET: x86
   SDK_VERSION: '25.12'
   CACHE_DIR: '~/.cache'
-  CACHE_DIR: ~/.cache
 
 jobs:
   build:
