@@ -160,8 +160,8 @@ jobs:
         uses: softprops/action-gh_release@v1
         with:
           files: |
-            *.ipk
-            *.apk
+            bin/*.ipk
+            bin/*.apk
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Notify Release Publish
