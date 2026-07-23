@@ -133,10 +133,8 @@ jobs:
         run: |
           cd "$SDK_EXTRACT_DIR"
 
-          # Create a feeds.conf for Alpine
-          cat > "feeds.conf.default" << 'FEEDS_EOF'
-git::https://github.com/rburton/xray-core-feeds.git
-FEEDS_EOF
+          # Create a feeds.conf for Alpine using printf to handle multi-line
+          printf '%s\n' 'git::https://github.com/rburton/xray-core-feeds.git' > "feeds.conf.default"
 
           # Update feeds
           ./scripts/feeds update -a
