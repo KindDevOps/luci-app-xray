@@ -1,4 +1,4 @@
-name: Alpine APK Build
+name: Openwrt Luci-Xcore Alpine APK Build 
 
 on:
   push:
