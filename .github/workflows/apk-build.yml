@@ -86,15 +86,12 @@ jobs:
           CACHE_DIR_SDK="${{ env.CACHE_DIR }}/sdk"
           CACHE_DIR_DL="${{ env.CACHE_DIR }}/dl"
           CACHE_DIR_FEEDS="${{ env.CACHE_DIR }}/feeds"
-
           echo "CACHE_DIR_SDK: $CACHE_DIR_SDK"
           echo "CACHE_DIR_DL: $CACHE_DIR_DL"
           echo "CACHE_DIR_FEEDS: $CACHE_DIR_FEEDS"
-
           test -d "$CACHE_DIR_SDK" || mkdir -p "$CACHE_DIR_SDK"
           test -d "$CACHE_DIR_DL" || mkdir -p "$CACHE_DIR_DL"
           test -d "$CACHE_DIR_FEEDS" || mkdir -p "$CACHE_DIR_FEEDS"
-
           echo "CACHE_DIR_SDK=$CACHE_DIR_SDK" >> $GITHUB_ENV
           echo "CACHE_DIR_DL=$CACHE_DIR_DL" >> $GITHUB_ENV
           echo "CACHE_DIR_FEEDS=$CACHE_DIR_FEEDS" >> $GITHUB_ENV
@@ -102,40 +99,31 @@ jobs:
       - name: Download and Unzip SDK
         run: |
           cd "$CACHE_DIR_SDK"
-
           # SDK filename (without version for flexibility)
           SDK_FILE="${{ matrix.sdk_name }}${{ matrix.arch }}"
-
           # Check if SDK already exists
           if [ ! -f "$SDK_FILE" ]; then
             echo "Downloading SDK..."
             wget -q --show-progress -O "$SDK_FILE" "${{ matrix.sdk_url_path }}/$SDK_FILE"
           fi
-
           # List the downloaded file
           file "$SDK_FILE"
-
           # Extract SDK to a new location
           SDK_EXTRACT_DIR=$(mktemp -d)/openwrt
           tar -C "$SDK_EXTRACT_DIR" --strip=1 -xf "$SDK_FILE"
-
           # Set up symlinks for feeds and downloads
           SDK_EXTRACT_DIR="$(eval echo "$SDK_EXTRACT_DIR")"
           test -d "$SDK_EXTRACT_DIR/dl" && rm -rf "$SDK_EXTRACT_DIR/dl" || true
           test -d "$SDK_EXTRACT_DIR/feeds" && rm -rf "$SDK_EXTRACT_DIR/feeds" || true
-
           ln -s "$CACHE_DIR_DL" "$SDK_EXTRACT_DIR/dl"
           ln -s "$CACHE_DIR_FEEDS" "$SDK_EXTRACT_DIR/feeds"
-
           echo "SDK_EXTRACT_DIR=$SDK_EXTRACT_DIR" >> $GITHUB_ENV
 
       - name: Setup Feeds
         run: |
           cd "$SDK_EXTRACT_DIR"
-
           # Create feeds.conf.default with printf for clean output
           printf 'git::https://github.com/rburton/xray-core-feeds.git\n' > "feeds.conf.default"
-
           # Update and install feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
@@ -143,10 +131,8 @@ jobs:
       - name: Compile Package
         run: |
           cd "$SDK_EXTRACT_DIR"
-
           # Compile just our package
           make package/${{ env.PACKAGE_NAME }}/compile/${{ env.PACKAGE_NAME }} V=s || true
-
           # List built files
           echo "=== Built files in bin/ ==="
           find "$SDK_EXTRACT_DIR/bin/" -type f \( -name "*.ipk" -o -name "*.apk" \) -exec ls -lh {} \; || true
@@ -154,23 +140,18 @@ jobs:
       - name: Copy Artifacts
         run: |
           cd "$SDK_EXTRACT_DIR"
-
           # Copy the main binary
           BINARY_NAME="${{ env.PACKAGE_NAME }}"
-
           if [ -f "$SDK_EXTRACT_DIR/bin/${BINARY_NAME}" ]; then
             cp "$SDK_EXTRACT_DIR/bin/${BINARY_NAME}" "${{ github.workspace }}/${BINARY_NAME}"
             echo "Built binary: $BINARY_NAME"
           fi
-
           # Copy the .apk if it exists
           APK_NAME="${{ env.PACKAGE_NAME }}.apk"
-
           if [ -f "$SDK_EXTRACT_DIR/bin/${APK_NAME}" ]; then
             cp "$SDK_EXTRACT_DIR/bin/${APK_NAME}" "${{ github.workspace }}/${APK_NAME}"
             echo "Built APK: $APK_NAME"
           fi
-
           # List all artifacts
           echo "=== Artifact List ==="
           find "${{ github.workspace }}" -maxdepth 1 -type f \( -name "*.ipk" -o -name "*.apk" \) -exec ls -lh {} \; || true
