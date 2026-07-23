@@ -22,13 +22,6 @@ on:
         required: false
         default: 'x86'
 
-env:
-  PACKAGE_NAME: luci-app-xray
-  TARGET: alpine
-  SDK_TARGET: x86
-  SDK_VERSION: '25.12'
-  CACHE_DIR: '~/.cache'
-
 jobs:
   build:
     name: Build Alpine APK
