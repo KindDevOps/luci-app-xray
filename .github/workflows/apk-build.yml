@@ -8,10 +8,6 @@ on:
     branches:
       - apk
   workflow_dispatch:
-    with:
-      target: 'alpine'
-      sdk_version: '25.12'
-      sdk_target: 'x86'
     inputs:
       target:
         description: 'Build target architecture'
@@ -32,7 +28,6 @@ env:
   SDK_TARGET: x86
   SDK_VERSION: '25.12'
   CACHE_DIR: '~/.cache'
-  SDK_VERSION: 25.12
   CACHE_DIR: ~/.cache
 
 jobs:
