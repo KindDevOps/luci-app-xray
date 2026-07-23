@@ -134,9 +134,9 @@ jobs:
           cd "$SDK_EXTRACT_DIR"
 
           # Create a feeds.conf for Alpine
-          cat > "feeds.conf.default" << 'EOF'
+          cat > "feeds.conf.default" << 'FEEDS_EOF'
 git::https://github.com/rburton/xray-core-feeds.git
-EOF
+FEEDS_EOF
 
           # Update feeds
           ./scripts/feeds update -a
@@ -180,7 +180,7 @@ EOF
           find "${{ github.workspace }}" -maxdepth 1 -type f \( -name "*.ipk" -o -name "*.apk" \) -exec ls -lh {} \; || true
 
       - name: Release and Upload Assets
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh_release@v1
         with:
           files: |
             *.ipk
