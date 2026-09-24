@@ -11,7 +11,7 @@ on:
 
 env:
   PACKAGE_NAME: luci-app-xray
-  CACHE_DIR: ~/cache
+  CACHE_DIR: ${{ github.workspace }}/.cache
 
 jobs:
   build:
@@ -46,7 +46,6 @@ jobs:
       - name: Prepare Cache Directories
         run: |
           mkdir -p "$CACHE_DIR/sdk" "$CACHE_DIR/dl" "$CACHE_DIR/feeds"
-          echo "CACHE_DIR=$(eval echo $CACHE_DIR)" >> "$GITHUB_ENV"
           echo "SDK_HOME=$(mktemp -d)/openwrt" >> "$GITHUB_ENV"
 
       - name: Download and Extract SDK
@@ -70,9 +69,10 @@ jobs:
           rm -rf "$SDK_HOME"
           mkdir -p "$SDK_HOME"
           tar -C "$SDK_HOME" --strip=1 -xf "$CACHE_DIR/sdk/$SDK_FILE"
-          ln -sfn "$CACHE_DIR/dl" "$SDK_HOME/dl"
-          ln -sfn "$CACHE_DIR/feeds" "$SDK_HOME/feeds"
-          echo "SDK_HOME=$(eval echo $SDK_HOME)" >> "$GITHUB_ENV"
+          rm -rf "$SDK_HOME/dl" "$SDK_HOME/feeds"
+          ln -s "$CACHE_DIR/dl" "$SDK_HOME/dl"
+          ln -s "$CACHE_DIR/feeds" "$SDK_HOME/feeds"
+          echo "SDK_HOME=$SDK_HOME" >> "$GITHUB_ENV"
 
       - name: Configure Feeds
         run: |
