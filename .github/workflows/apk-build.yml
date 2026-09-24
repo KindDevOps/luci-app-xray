@@ -52,14 +52,14 @@ jobs:
         run: |
           cd "$CACHE_DIR/sdk"
           # Fetch the published checksum list and locate our SDK file
-          wget -q -O sha256sums.all "${matrix.sdk_url_path}/sha256sums"
-          grep -m1 "${matrix.sdk_name}" sha256sums.all > sha256sums.small || {
-            echo "::error::SDK $matrix.sdk_name not found in ${matrix.sdk_url_path}/sha256sums"
+          wget -q -O sha256sums.all "${{ matrix.sdk_url_path }}/sha256sums"
+          grep -m1 "${{ matrix.sdk_name }}" sha256sums.all > sha256sums.small || {
+            echo "::error::SDK ${{ matrix.sdk_name }} not found in ${{ matrix.sdk_url_path }}/sha256sums"
             exit 1
           }
           SDK_FILE="$(cut -d' ' -f2 sha256sums.small | sed 's/*//g')"
           if [ ! -f "$SDK_FILE" ]; then
-            wget -q --show-progress -O "$SDK_FILE" "${matrix.sdk_url_path}/$SDK_FILE"
+            wget -q --show-progress -O "$SDK_FILE" "${{ matrix.sdk_url_path }}/$SDK_FILE"
           fi
           if ! sha256sum --check sha256sums.small >/dev/null 2>&1; then
             echo "::error::SDK checksum verification failed!"
