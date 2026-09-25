@@ -15,13 +15,16 @@ env:
 
 jobs:
   build:
-    name: apk ${{ matrix.id }}
+    name: apk noarch
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - id: x86_64
+          # The three luci-app-xray packages are PKGARCH:=all (arch:noarch),
+          # so the SDK target only determines the host toolchain used to build
+          # the APK metadata; the produced .apk files install on any arch.
+          - id: noarch
             sdk_url_path: https://downloads.openwrt.org/releases/25.12.2/targets/x86/64
             sdk_name: openwrt-sdk-25.12.2-x86-64
     steps:
@@ -41,7 +44,7 @@ jobs:
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y \
-            ccache gettext libncurses5-dev xsltproc zstd tar wget curl file
+            gettext libncurses5-dev xsltproc zstd tar wget curl file
 
       - name: Prepare Cache Directories
         run: |
@@ -92,19 +95,41 @@ jobs:
         run: |
           cd "$SDK_HOME"
           make defconfig
-          # Packages live in subdirs (core, geodata, status), each with its own Makefile
-          make package/${PACKAGE_NAME}/core/compile V=s -j"$(nproc)"
-          make package/${PACKAGE_NAME}/geodata/compile V=s -j"$(nproc)"
-          make package/${PACKAGE_NAME}/status/compile V=s -j"$(nproc)"
+          # NO_DEPS=1: build only the packages themselves. Their runtime
+          # dependencies (kernel, luci, xray-core, ...) are NOT compiled here --
+          # they are only needed on the target at install time, and all three
+          # packages are arch:noarch static-file packages.
+          make NO_DEPS=1 -j"$(nproc)" \
+            package/${PACKAGE_NAME}/core/compile \
+            package/${PACKAGE_NAME}/geodata/compile \
+            package/${PACKAGE_NAME}/status/compile
           find "$SDK_HOME/bin" -type f -name "*.apk" -exec ls -lh {} \;
 
       - name: Collect Artifacts
         run: |
-          find "$SDK_HOME/bin" -type f -name "${PACKAGE_NAME}*.apk" | while read -r f; do
-            base="$(basename "$f")"
-            cp "$f" "${GITHUB_WORKSPACE}/${base%.*}-${{ matrix.id }}.${base##*.}"
+          # All three packages are PKGARCH:=all, so the APKs are arch:noarch
+          # (header arch:noarch) and install on every architecture. No arch
+          # suffix is added to the names.
+          shopt -s nullglob
+          for f in "$SDK_HOME"/bin/${PACKAGE_NAME}*.apk; do
+            cp "$f" "${GITHUB_WORKSPACE}/$(basename "$f")"
           done
           ls -lh "${GITHUB_WORKSPACE}"/*.apk
+
+      - name: Verify Packages
+        run: |
+          for p in luci-app-xray luci-app-xray-geodata luci-app-xray-status; do
+            f=$(ls "${GITHUB_WORKSPACE}/${p}-"*.apk 2>/dev/null | head -1)
+            if [ -z "$f" ]; then
+              echo "::error::missing artifact for ${p}"
+              exit 1
+            fi
+            if ! head -c 4 "$f" | grep -q ADBd; then
+              echo "::error::${f} is not a valid apk (bad magic)"
+              exit 1
+            fi
+            echo "OK: $(basename "$f")"
+          done
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
