@@ -110,10 +110,8 @@ jobs:
           # All three packages are PKGARCH:=all, so the APKs are arch:noarch
           # (header arch:noarch) and install on every architecture. No arch
           # suffix is added to the names.
-          shopt -s nullglob
-          for f in "$SDK_HOME"/bin/${PACKAGE_NAME}*.apk; do
-            cp "$f" "${GITHUB_WORKSPACE}/$(basename "$f")"
-          done
+          find "$SDK_HOME/bin" -type f -name "${PACKAGE_NAME}*.apk" \
+            -exec cp {} "${GITHUB_WORKSPACE}/" \;
           ls -lh "${GITHUB_WORKSPACE}"/*.apk
 
       - name: Verify Packages
