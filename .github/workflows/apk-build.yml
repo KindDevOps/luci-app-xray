@@ -1,0 +1,257 @@
+name: Build Alpine (apk) Packages
+
+on:
+  push:
+    branches:
+      - apk
+      - master
+  pull_request:
+    branches:
+      - apk
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: apk-build
+  cancel-in-progress: true
+
+env:
+  PACKAGE_NAME: luci-app-xray
+  CACHE_DIR: ${{ github.workspace }}/.cache
+
+jobs:
+  build:
+    name: apk noarch
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The three luci-app-xray packages are PKGARCH:=all (arch:noarch),
+          # so the SDK target only determines the host toolchain used to build
+          # the APK metadata; the produced .apk files install on any arch.
+          - id: noarch
+            sdk_url_path: https://downloads.openwrt.org/releases/25.12.2/targets/x86/64
+            sdk_name: openwrt-sdk-25.12.2-x86-64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CACHE_DIR }}
+          key: alpine-sdk-${{ matrix.sdk_name }}-${{ env.PACKAGE_NAME }}
+          restore-keys: |
+            alpine-sdk-${{ matrix.sdk_name }}-
+
+      - name: Install Dependencies
+        run: |
+          DEBIAN_FRONTEND=noninteractive sudo apt-get update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y \
+            gettext libncurses5-dev xsltproc zstd tar wget curl file
+
+      - name: Prepare Cache Directories
+        run: |
+          mkdir -p "$CACHE_DIR/sdk" "$CACHE_DIR/dl" "$CACHE_DIR/feeds"
+          echo "SDK_HOME=$(mktemp -d)/openwrt" >> "$GITHUB_ENV"
+
+      - name: Download and Extract SDK
+        run: |
+          cd "$CACHE_DIR/sdk"
+          # Fetch the published checksum list and locate our SDK file
+          wget -q -O sha256sums.all "${{ matrix.sdk_url_path }}/sha256sums"
+          grep -m1 "${{ matrix.sdk_name }}" sha256sums.all > sha256sums.small || {
+            echo "::error::SDK ${{ matrix.sdk_name }} not found in ${{ matrix.sdk_url_path }}/sha256sums"
+            exit 1
+          }
+          SDK_FILE="$(cut -d' ' -f2 sha256sums.small | sed 's/*//g')"
+          if [ ! -f "$SDK_FILE" ]; then
+            wget -q --show-progress -O "$SDK_FILE" "${{ matrix.sdk_url_path }}/$SDK_FILE"
+          fi
+          if ! sha256sum --check sha256sums.small >/dev/null 2>&1; then
+            echo "::error::SDK checksum verification failed!"
+            exit 1
+          fi
+          # Extract to a fresh directory, symlink shared caches
+          rm -rf "$SDK_HOME"
+          mkdir -p "$SDK_HOME"
+          tar -C "$SDK_HOME" --strip=1 -xf "$CACHE_DIR/sdk/$SDK_FILE"
+          rm -rf "$SDK_HOME/dl" "$SDK_HOME/feeds"
+          ln -s "$CACHE_DIR/dl" "$SDK_HOME/dl"
+          ln -s "$CACHE_DIR/feeds" "$SDK_HOME/feeds"
+          echo "SDK_HOME=$SDK_HOME" >> "$GITHUB_ENV"
+
+      - name: Configure Feeds
+        run: |
+          cd "$SDK_HOME"
+          # Use GitHub mirrors for the OpenWrt core feeds
+          cp feeds.conf.default feeds.conf
+          sed -i 's#git.openwrt.org/openwrt/openwrt#github.com/openwrt/openwrt#' feeds.conf
+          sed -i 's#git.openwrt.org/feed/packages#github.com/openwrt/packages#' feeds.conf
+          sed -i 's#git.openwrt.org/project/luci#github.com/openwrt/luci#' feeds.conf
+          sed -i 's#git.openwrt.org/feed/telephony#github.com/openwrt/telephony#' feeds.conf
+          ./scripts/feeds update -a
+          # Make this package part of the feed tree so package/Makefile lists it
+          ln -sfn "${GITHUB_WORKSPACE}" "package/$(basename "${GITHUB_WORKSPACE}")"
+          ./scripts/feeds install -a
+
+      - name: Compile Packages
+        run: |
+          cd "$SDK_HOME"
+          make defconfig
+          # NO_DEPS=1: build only the packages themselves. Their runtime
+          # dependencies (kernel, luci, xray-core, ...) are NOT compiled here --
+          # they are only needed on the target at install time, and all three
+          # packages are arch:noarch static-file packages.
+          make NO_DEPS=1 -j"$(nproc)" \
+            package/${PACKAGE_NAME}/core/compile \
+            package/${PACKAGE_NAME}/geodata/compile \
+            package/${PACKAGE_NAME}/status/compile
+          find "$SDK_HOME/bin" -type f -name "*.apk" -exec ls -lh {} \;
+
+      - name: Collect Packages and Build Repository Index
+        run: |
+          # All three packages are PKGARCH:=all, so the APKs are arch:noarch
+          # (header arch:noarch) and install on every architecture.
+          REPO_DIR="$GITHUB_WORKSPACE/apk-repo"
+          rm -rf "$REPO_DIR" && mkdir -p "$REPO_DIR"
+          find "$SDK_HOME/bin" -type f -name "${PACKAGE_NAME}*.apk" \
+            -exec cp {} "$REPO_DIR/" \;
+          # Build the repository index with the SDK's own host apk tool -- the
+          # same invocation OpenWrt's package/Makefile uses for its own index.
+          APK="$SDK_HOME/staging_dir/host/bin/apk"
+          test -x "$APK" || { echo "::error::host apk tool not found at $APK"; exit 1; }
+          ( cd "$REPO_DIR" && "$APK" mkndx \
+              --root "$SDK_HOME" --keys-dir "$SDK_HOME" --allow-untrusted \
+              --output packages.adb \
+              luci-app-xray-*.apk luci-app-xray-geodata-*.apk luci-app-xray-status-*.apk )
+          ls -lh "$REPO_DIR"
+
+      - name: Verify Packages and Index
+        run: |
+          cd "$GITHUB_WORKSPACE/apk-repo"
+          APK="$SDK_HOME/staging_dir/host/bin/apk"
+          # exactly the 3 expected packages
+          N=$(find . -maxdepth 1 -type f -name '*.apk' | wc -l)
+          [ "$N" -eq 3 ] || { echo "::error::expected 3 apks, found $N"; exit 1; }
+          for p in luci-app-xray luci-app-xray-geodata luci-app-xray-status; do
+            f=$(ls "${p}-"*.apk 2>/dev/null | head -1)
+            if [ -z "$f" ]; then
+              echo "::error::missing artifact for ${p}"
+              exit 1
+            fi
+            if ! head -c 4 "$f" | grep -q ADBd; then
+              echo "::error::${f} is not a valid apk (bad magic)"
+              exit 1
+            fi
+            echo "OK: $(basename "$f")"
+          done
+          # index present, valid magic, lists the 3 noarch packages
+          head -c 4 packages.adb | grep -q ADBd || { echo "::error::packages.adb bad magic"; exit 1; }
+          "$APK" adbdump --format json packages.adb | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          pkgs = data.get("packages", []) if isinstance(data, dict) else data
+          names = [p.get("name", "") for p in pkgs if isinstance(p, dict)]
+          missing = [n for n in ["luci-app-xray", "luci-app-xray-geodata", "luci-app-xray-status"] if n not in names]
+          print("index packages:", names)
+          sys.exit(1 if missing else 0)
+          ' || { echo "::error::index is missing expected packages"; exit 1; }
+
+      - name: Publish Repository (gh-pages branch)
+        run: |
+          # The apk repository must be a flat, path-addressable directory:
+          #   <site>/packages.adb + <site>/<name>-<version>.apk
+          # (apk derives each package URL as <dir of the repo file>/<name>-<version>.apk,
+          #  exactly the layout OpenWrt's own release repositories use.)
+          # GitHub Releases cannot do this (assets are not path-addressable),
+          # so the repository is published to the gh-pages branch.
+          set -e
+          REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          PLAIN_URL="https://github.com/${GITHUB_REPOSITORY}.git"
+          rm -rf .repo-ghpages
+          mkdir .repo-ghpages
+          ( cd .repo-ghpages && git init -q -b gh-pages && git remote add origin "$REPO_URL" )
+          cp -a apk-repo/. .repo-ghpages/
+          git -C .repo-ghpages add -A
+          git -C .repo-ghpages -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Publish apk repository (index + packages)"
+          # full-content push: the branch always mirrors the freshly built repo
+          git -C .repo-ghpages push --force origin gh-pages
+          git ls-remote --heads "$PLAIN_URL" gh-pages
+
+      - name: Ensure GitHub Pages Site
+        run: |
+          python3 << 'PYEOF'
+          import json, os, time, urllib.request
+          tok = os.environ["GITHUB_TOKEN"]
+          base = "https://api.github.com/repos/%s/pages" % os.environ["GITHUB_REPOSITORY"]
+          def call(method, body=None):
+              req = urllib.request.Request(base, method=method,
+                  data=(json.dumps(body).encode() if body else None),
+                  headers={"Accept": "application/vnd.github+json",
+                           "Authorization": "***" + tok,
+                           **({"Content-Type": "application/json"} if body else {})})
+              try:
+                  with urllib.request.urlopen(req) as r:
+                      return r.status, json.load(r)
+              except urllib.error.HTTPError as e:
+                  try:
+                      return e.code, json.load(e)
+                  except Exception:
+                      return e.code, {}
+          s, d = call("GET")
+          if s == 404:
+              s, d = call("POST", {"build_type": "deployment",
+                                   "source": {"branch": "gh-pages", "path": "/"}})
+              print("created pages site:", s, json.dumps(d)[:300])
+              time.sleep(10)
+              s, d = call("GET")
+          for _ in range(20):
+              s, d = call("GET")
+              status = d.get("status")
+              print("pages status: %s | url: %s" % (status, d.get("html_url")))
+              if status == "built":
+                  break
+              time.sleep(30)
+          else:
+              print("::warning::pages build did not finish within timeout")
+          PYEOF
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}-${{ matrix.id }}
+          path: |
+            ${{ github.workspace }}/apk-repo/*.apk
+            ${{ github.workspace }}/apk-repo/packages.adb
+          if-no-files-found: error
+
+      - name: Publish Release
+        if: github.event == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.sha }}
+          files: |
+            apk-repo/*.apk
+            apk-repo/packages.adb
+          release_name: luci-app-xray apk repository
+          body: |
+            APK repository (noarch). To use it on an OpenWrt 25.12+ system:
+
+            ```sh
+            echo 'https://kinddevops.github.io/luci-app-xray/packages.adb' >> /etc/apk/repositories
+            apk update --allow-untrusted
+            apk add --allow-untrusted luci-app-xray luci-app-xray-geodata luci-app-xray-status
+            ```
+
+            See README_apk.md for details.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
