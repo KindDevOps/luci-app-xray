@@ -4,10 +4,20 @@ on:
   push:
     branches:
       - apk
+      - master
   pull_request:
     branches:
       - apk
+      - master
   workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: apk-build
+  cancel-in-progress: true
 
 env:
   PACKAGE_NAME: luci-app-xray
@@ -105,19 +115,33 @@ jobs:
             package/${PACKAGE_NAME}/status/compile
           find "$SDK_HOME/bin" -type f -name "*.apk" -exec ls -lh {} \;
 
-      - name: Collect Artifacts
+      - name: Collect Packages and Build Repository Index
         run: |
           # All three packages are PKGARCH:=all, so the APKs are arch:noarch
-          # (header arch:noarch) and install on every architecture. No arch
-          # suffix is added to the names.
+          # (header arch:noarch) and install on every architecture.
+          REPO_DIR="$GITHUB_WORKSPACE/apk-repo"
+          rm -rf "$REPO_DIR" && mkdir -p "$REPO_DIR"
           find "$SDK_HOME/bin" -type f -name "${PACKAGE_NAME}*.apk" \
-            -exec cp {} "${GITHUB_WORKSPACE}/" \;
-          ls -lh "${GITHUB_WORKSPACE}"/*.apk
+            -exec cp {} "$REPO_DIR/" \;
+          # Build the repository index with the SDK's own host apk tool -- the
+          # same invocation OpenWrt's package/Makefile uses for its own index.
+          APK="$SDK_HOME/staging_dir/host/bin/apk"
+          test -x "$APK" || { echo "::error::host apk tool not found at $APK"; exit 1; }
+          ( cd "$REPO_DIR" && "$APK" mkndx \
+              --root "$SDK_HOME" --keys-dir "$SDK_HOME" --allow-untrusted \
+              --output packages.adb \
+              luci-app-xray-*.apk luci-app-xray-geodata-*.apk luci-app-xray-status-*.apk )
+          ls -lh "$REPO_DIR"
 
-      - name: Verify Packages
+      - name: Verify Packages and Index
         run: |
+          cd "$GITHUB_WORKSPACE/apk-repo"
+          APK="$SDK_HOME/staging_dir/host/bin/apk"
+          # exactly the 3 expected packages
+          N=$(find . -maxdepth 1 -type f -name '*.apk' | wc -l)
+          [ "$N" -eq 3 ] || { echo "::error::expected 3 apks, found $N"; exit 1; }
           for p in luci-app-xray luci-app-xray-geodata luci-app-xray-status; do
-            f=$(ls "${GITHUB_WORKSPACE}/${p}-"*.apk 2>/dev/null | head -1)
+            f=$(ls "${p}-"*.apk 2>/dev/null | head -1)
             if [ -z "$f" ]; then
               echo "::error::missing artifact for ${p}"
               exit 1
@@ -128,13 +152,86 @@ jobs:
             fi
             echo "OK: $(basename "$f")"
           done
+          # index present, valid magic, lists the 3 noarch packages
+          head -c 4 packages.adb | grep -q ADBd || { echo "::error::packages.adb bad magic"; exit 1; }
+          "$APK" adbdump --format json packages.adb | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          pkgs = data.get("packages", []) if isinstance(data, dict) else data
+          names = [p.get("name", "") for p in pkgs if isinstance(p, dict)]
+          missing = [n for n in ["luci-app-xray", "luci-app-xray-geodata", "luci-app-xray-status"] if n not in names]
+          print("index packages:", names)
+          sys.exit(1 if missing else 0)
+          ' || { echo "::error::index is missing expected packages"; exit 1; }
+
+      - name: Publish Repository (gh-pages branch)
+        run: |
+          # The apk repository must be a flat, path-addressable directory:
+          #   <site>/packages.adb + <site>/<name>-<version>.apk
+          # (apk derives each package URL as <dir of the repo file>/<name>-<version>.apk,
+          #  exactly the layout OpenWrt's own release repositories use.)
+          # GitHub Releases cannot do this (assets are not path-addressable),
+          # so the repository is published to the gh-pages branch.
+          set -e
+          REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          PLAIN_URL="https://github.com/${GITHUB_REPOSITORY}.git"
+          rm -rf .repo-ghpages
+          mkdir .repo-ghpages
+          ( cd .repo-ghpages && git init -q -b gh-pages && git remote add origin "$REPO_URL" )
+          cp -a apk-repo/. .repo-ghpages/
+          git -C .repo-ghpages add -A
+          git -C .repo-ghpages -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Publish apk repository (index + packages)"
+          # full-content push: the branch always mirrors the freshly built repo
+          git -C .repo-ghpages push --force origin gh-pages
+          git ls-remote --heads "$PLAIN_URL" gh-pages
+
+      - name: Ensure GitHub Pages Site
+        run: |
+          python3 << 'PYEOF'
+          import json, os, time, urllib.request
+          tok = os.environ["GITHUB_TOKEN"]
+          base = "https://api.github.com/repos/%s/pages" % os.environ["GITHUB_REPOSITORY"]
+          def call(method, body=None):
+              req = urllib.request.Request(base, method=method,
+                  data=(json.dumps(body).encode() if body else None),
+                  headers={"Accept": "application/vnd.github+json",
+                           "Authorization": "***" + tok,
+                           **({"Content-Type": "application/json"} if body else {})})
+              try:
+                  with urllib.request.urlopen(req) as r:
+                      return r.status, json.load(r)
+              except urllib.error.HTTPError as e:
+                  try:
+                      return e.code, json.load(e)
+                  except Exception:
+                      return e.code, {}
+          s, d = call("GET")
+          if s == 404:
+              s, d = call("POST", {"build_type": "deployment",
+                                   "source": {"branch": "gh-pages", "path": "/"}})
+              print("created pages site:", s, json.dumps(d)[:300])
+              time.sleep(10)
+              s, d = call("GET")
+          for _ in range(20):
+              s, d = call("GET")
+              status = d.get("status")
+              print("pages status: %s | url: %s" % (status, d.get("html_url")))
+              if status == "built":
+                  break
+              time.sleep(30)
+          else:
+              print("::warning::pages build did not finish within timeout")
+          PYEOF
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PACKAGE_NAME }}-${{ matrix.id }}
           path: |
-            ${{ github.workspace }}/*.apk
+            ${{ github.workspace }}/apk-repo/*.apk
+            ${{ github.workspace }}/apk-repo/packages.adb
           if-no-files-found: error
 
       - name: Publish Release
@@ -143,7 +240,18 @@ jobs:
         with:
           tag_name: apk-${{ github.sha }}
           files: |
-            *.apk
-          generate_release_notes: true
+            apk-repo/*.apk
+            apk-repo/packages.adb
+          release_name: luci-app-xray apk repository
+          body: |
+            APK repository (noarch). To use it on an OpenWrt 25.12+ system:
+
+            ```sh
+            echo 'https://kinddevops.github.io/luci-app-xray/packages.adb' >> /etc/apk/repositories
+            apk update --allow-untrusted
+            apk add --allow-untrusted luci-app-xray luci-app-xray-geodata luci-app-xray-status
+            ```
+
+            See README_apk.md for details.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
