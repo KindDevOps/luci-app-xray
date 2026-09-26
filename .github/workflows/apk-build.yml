@@ -130,7 +130,7 @@ jobs:
           ( cd "$REPO_DIR" && "$APK" mkndx \
               --root "$SDK_HOME" --keys-dir "$SDK_HOME" --allow-untrusted \
               --output packages.adb \
-              luci-app-xray-*.apk luci-app-xray-geodata-*.apk luci-app-xray-status-*.apk )
+              luci-app-xray-*.apk )
           ls -lh "$REPO_DIR"
 
       - name: Verify Packages and Index
@@ -165,6 +165,10 @@ jobs:
           ' || { echo "::error::index is missing expected packages"; exit 1; }
 
       - name: Publish Repository (gh-pages branch)
+        env:
+          # A repo secret named GITHUB_TOKEN would shadow the automatic
+          # token and may hold a stale/revoked value; prefer the PAT.
+          PUBLISH_TOKEN: ${{ secrets.GITHUB_PAT || secrets.GITHUB_TOKEN }}
         run: |
           # The apk repository must be a flat, path-addressable directory:
           #   <site>/packages.adb + <site>/<name>-<version>.apk
@@ -173,7 +177,7 @@ jobs:
           # GitHub Releases cannot do this (assets are not path-addressable),
           # so the repository is published to the gh-pages branch.
           set -e
-          REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          REPO_URL="https://x-access-token:${PUBLISH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           PLAIN_URL="https://github.com/${GITHUB_REPOSITORY}.git"
           rm -rf .repo-ghpages
           mkdir .repo-ghpages
@@ -188,10 +192,12 @@ jobs:
           git ls-remote --heads "$PLAIN_URL" gh-pages
 
       - name: Ensure GitHub Pages Site
+        env:
+          PUBLISH_TOKEN: ${{ secrets.GITHUB_PAT || secrets.GITHUB_TOKEN }}
         run: |
           python3 << 'PYEOF'
           import json, os, time, urllib.request
-          tok = os.environ["GITHUB_TOKEN"]
+          tok = os.environ["PUBLISH_TOKEN"]
           base = "https://api.github.com/repos/%s/pages" % os.environ["GITHUB_REPOSITORY"]
           def call(method, body=None):
               req = urllib.request.Request(base, method=method,
