@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-xray
 PKG_VERSION:=3.7.1
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_LICENSE:=MPLv2
 PKG_LICENSE_FILES:=LICENSE
@@ -15,7 +15,10 @@ define Package/$(PKG_NAME)
 	SECTION:=Custom
 	CATEGORY:=Extra packages
 	TITLE:=LuCI Support for Xray
-	DEPENDS:=firewall4 +kmod-nft-tproxy +luci-base +xray-core +dnsmasq +ca-bundle
+	DEPENDS:=firewall4 +luci-base +xray-core +dnsmasq +ca-bundle
+	# NOTE: kmod-nft-tproxy (transparent proxy) is a per-target kernel module;
+	# it cannot ship in a noarch repo and is only required when transparent
+	# proxy is enabled -- install it from your firmware's kmods repo.
 	PKGARCH:=all
 endef
 
